@@ -1,7 +1,11 @@
-# Soundings
+<h1 align="center">
+  <img src="logo.png" alt="Soundings" width="520">
+</h1>
 
+<p align="center">
 **Weekly team activity digest across Gitea, GitHub, Jenkins, ArgoCD, Jira,
 ZenDesk, and OpsGenie.**
+</p>
 
 Taking soundings means measuring the same water repeatedly to learn its shape.
 Soundings does that for a team's week: it reads each system a team already

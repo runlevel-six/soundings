@@ -226,14 +226,27 @@ def tracked_files(root: str, rev) -> list:
 
 
 def file_text(root: str, path: str, rev) -> str:
+    """Every tracked file as text, binaries included.
+
+    Read as bytes and decoded leniently, because a tracked image is not
+    exempt: PNG text chunks and embedded provenance blobs carry plain strings,
+    and that is a place a real name can hide. Undecodable bytes become
+    replacement characters, which are non-alphanumeric and so still act as
+    word boundaries for the term patterns.
+    """
     if rev:
-        return subprocess.run(['git', 'show', f'{rev}:{path}'], capture_output=True,
-                              text=True, cwd=root).stdout
-    try:
-        with open(os.path.join(root, path), encoding='utf-8', errors='replace') as handle:
-            return handle.read()
-    except (OSError, UnicodeDecodeError):
-        return ''
+        result = subprocess.run(['git', 'show', f'{rev}:{path}'],
+                                capture_output=True, cwd=root)
+        if result.returncode != 0:                   # a submodule, or gone
+            return ''
+        raw = result.stdout
+    else:
+        try:
+            with open(os.path.join(root, path), 'rb') as handle:
+                raw = handle.read()
+        except OSError:                              # a submodule, or gone
+            return ''
+    return raw.decode('utf-8', errors='replace')
 
 
 def main() -> int:

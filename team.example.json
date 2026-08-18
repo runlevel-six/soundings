@@ -1,0 +1,29 @@
+[
+  {
+    "id": "leia.solo",
+    "display_name": "Leia Solo",
+    "timezone": "America/Chicago",
+    "aliases": {
+      "default": ["leiasolo"],
+      "jira": ["leiaskywalker"]
+    }
+  },
+  {
+    "id": "han.solo",
+    "display_name": "Han Solo",
+    "timezone": "America/Denver",
+    "aliases": {
+      "default": ["hsolo"],
+      "gitea": ["hsolo", "jenosidanian"],
+      "github": ["hsolo", "ijones"]
+    }
+  },
+  {
+    "id": "luke.skywalker",
+    "display_name": "Luke Skywalker",
+    "aliases": {
+      "default": ["lukeskywalker"],
+      "opsgenie": ["luke.skywalker@example.com"]
+    }
+  }
+]

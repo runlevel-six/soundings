@@ -1,0 +1,51 @@
+#
+# Please do not include anything that is specific to your operating system in
+# this .gitignore. If you need to include things like .DS_Store or .desktop
+# files. They should go in your global .gitignore.
+#
+# In your ~/.gitconfig add a global gitignore:
+#
+# [core]
+#   excludesfile = ~/.gitignore
+#
+.task/
+.venv/
+.ansible/
+*.retry
+__pycache__/
+tmp/
+vault.yml
+*.pyc
+ansible.cfg
+.ansible.cfg
+*console.log
+
+# ---------------------------------------------------------------------------
+# Everything below holds real data about real people. None of it belongs in a
+# public repository, so the patterns are deliberately broad: it is cheaper to
+# force an explicit `git add -f` than to rewrite history after a leak.
+# ---------------------------------------------------------------------------
+
+# Credentials. .env.example is the only one that ships.
+.env
+.env.*
+!.env.example
+
+# The team roster maps real names to per-source usernames.
+# team.example.json is the committed template.
+team.json
+team.*.json
+!team.example.json
+
+# Jira exports contain issue summaries, descriptions, assignees and watchers.
+jira_export.csv
+*_export.csv
+
+# Generated output: per-person activity metrics, in every format.
+reports/
+
+# Local tool and editor state.
+.claude/settings.local.json
+.devcontainer/
+.idea/
+.vscode/

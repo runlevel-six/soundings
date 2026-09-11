@@ -23,7 +23,8 @@
     "display_name": "Luke Skywalker",
     "aliases": {
       "default": ["lukeskywalker"],
-      "opsgenie": ["luke.skywalker@example.com"]
+      "opsgenie": ["luke.skywalker@example.com"],
+      "grafana_irm": ["luke.skywalker@example.com"]
     }
   }
 ]

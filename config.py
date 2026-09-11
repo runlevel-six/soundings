@@ -150,6 +150,31 @@ CONFIG = {
         'default_timezone': os.environ.get('DEVOPS_METRICS_DEFAULT_TIMEZONE', 'UTC'),
         # Working-day window, in each member's local time, as HH:MM-HH:MM.
         'business_hours': os.environ.get('DEVOPS_METRICS_BUSINESS_HOURS', '08:00-18:00'),
+    },
+
+    # Grafana IRM Configuration (optional - skipped if no token is set).
+    # The OpsGenie replacement; both run side by side during the migration and
+    # their per-member numbers are merged into one alert view in the report.
+    'grafana_irm': {
+        'token': os.environ.get('GRAFANA_IRM_TOKEN', ''),
+        # The OnCall API endpoint from IRM -> Settings -> Admin & API, NOT the
+        # Grafana stack URL.
+        'api_url': os.environ.get('GRAFANA_IRM_API_URL', ''),
+        # Set only for a Grafana service account token, which additionally needs
+        # the stack URL sent as an X-Grafana-URL header. Leave unset for a legacy
+        # OnCall API key.
+        'stack_url': os.environ.get('GRAFANA_IRM_STACK_URL', ''),
+        'email_domain': os.environ.get('GRAFANA_IRM_EMAIL_DOMAIN',
+                                       os.environ.get('OPSGENIE_EMAIL_DOMAIN',
+                                                      os.environ.get('ZENDESK_EMAIL_DOMAIN', ''))),
+        # Alert group label read as the alert's severity, IRM's nearest thing to
+        # an OpsGenie priority. Free-form in IRM, so it is configurable.
+        'severity_label': os.environ.get('GRAFANA_IRM_SEVERITY_LABEL', 'severity'),
+        # Fallback for members whose team.json entry has no "timezone" and whose
+        # IRM user record does not name one either.
+        'default_timezone': os.environ.get('DEVOPS_METRICS_DEFAULT_TIMEZONE', 'UTC'),
+        # Working-day window, in each member's local time, as HH:MM-HH:MM.
+        'business_hours': os.environ.get('DEVOPS_METRICS_BUSINESS_HOURS', '08:00-18:00'),
     }
 }
 
@@ -250,6 +275,40 @@ def validate_config() -> bool:
                   f"({base_url}), which does not serve the REST API. Use "
                   f"https://api.opsgenie.com (or https://api.eu.opsgenie.com for "
                   f"EU-hosted accounts).")
+            return False
+
+    # Check Grafana IRM config (only if a token is set — IRM is optional).
+    grafana_irm = CONFIG.get('grafana_irm', {})
+    if grafana_irm.get('token'):
+        api_url = (grafana_irm.get('api_url') or '').strip()
+        if not api_url:
+            print("Warning: GRAFANA_IRM_API_URL is required when GRAFANA_IRM_TOKEN is set. "
+                  "Find it under IRM -> Settings -> Admin & API (it looks like "
+                  "https://oncall-prod-us-central-0.grafana.net/oncall).")
+            return False
+
+        # The stack URL is what people copy out of the browser, and it serves the
+        # Grafana UI rather than the OnCall API. Say so here rather than letting
+        # every request 404 with no explanation — the same trap OPSGENIE_API_URL
+        # has with the OpsGenie web portal.
+        host = api_url.split('://')[-1].split('/')[0].lower()
+        path = api_url.split('://')[-1][len(host):].strip('/')
+        if host.endswith('.grafana.net') and not host.startswith('oncall-') and not path:
+            print(f"Warning: GRAFANA_IRM_API_URL is set to your Grafana stack URL "
+                  f"({api_url}), which does not serve the OnCall API. Use the API "
+                  f"endpoint shown under IRM -> Settings -> Admin & API, and put the "
+                  f"stack URL in GRAFANA_IRM_STACK_URL instead if you are using a "
+                  f"service account token.")
+            return False
+
+        # A service account token is authenticated differently from a legacy
+        # OnCall API key, and sending one in the other's form is an opaque 401.
+        # The collector probes both at preflight, but a token that plainly needs
+        # the stack header is worth catching before the run starts.
+        if grafana_irm['token'].startswith('glsa_') and not grafana_irm.get('stack_url'):
+            print("Warning: GRAFANA_IRM_TOKEN looks like a Grafana service account "
+                  "token (glsa_...), which also requires GRAFANA_IRM_STACK_URL to be "
+                  "set to your stack URL (e.g. https://myorg.grafana.net).")
             return False
 
     # Validate the out-of-hours settings whether or not OpsGenie is enabled, and

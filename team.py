@@ -26,7 +26,8 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Canonical source names used as keys in TeamMember.aliases
-SOURCES = ['gitea', 'github', 'jenkins', 'argocd', 'jira', 'zendesk', 'opsgenie']
+SOURCES = ['gitea', 'github', 'jenkins', 'argocd', 'jira', 'zendesk', 'opsgenie',
+           'grafana_irm']
 
 
 @dataclass

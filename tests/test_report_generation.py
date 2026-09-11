@@ -20,12 +20,17 @@ from utils import export_metrics_to_csv
 r = Results('Report generation')
 
 
-def run_case(label, metrics, expect_opsgenie):
-    """Generate every output for one metrics payload and check the invariants."""
+def run_case(label, metrics, expect_alerts):
+    """Generate every output for one metrics payload and check the invariants.
+
+    *expect_alerts* is about the merged OpsGenie + Grafana IRM view, which is what
+    the report renders: either tool having activity is enough to bring the alert
+    columns back.
+    """
     out = tempfile.mkdtemp(prefix=f'case_{label}_')
     generator = TeamMetricsReportGenerator(metrics)
 
-    r.equals(f'[{label}] has_opsgenie_data', generator.has_opsgenie_data, expect_opsgenie)
+    r.equals(f'[{label}] has_alert_data', generator.has_alert_data, expect_alerts)
 
     report_path = generator.generate_complete_report(out)
     with open(report_path) as f:
@@ -35,8 +40,12 @@ def run_case(label, metrics, expect_opsgenie):
               if name.endswith('.png')]
     csv_path = export_metrics_to_csv(metrics, out)
 
-    r.equals(f'[{label}] OpsGenie mentioned in report',
-             'OpsGenie' in report, expect_opsgenie)
+    r.equals(f'[{label}] alert response reported',
+             'Alert Response:' in report, expect_alerts)
+    # The two alerting tools are merged into one view, so naming either of them
+    # in the report would misattribute the other's alerts to it.
+    r.check(f'[{label}] no tool name leaks into the merged alert view',
+            'OpsGenie' not in report and 'Grafana IRM' not in report)
     r.equals(f'[{label}] exactly one dashboard image', len(charts), 1)
 
     # Every table row must carry the same column count as its header.
@@ -46,10 +55,20 @@ def run_case(label, metrics, expect_opsgenie):
 
     with open(csv_path) as f:
         header = f.readline()
-    opsgenie_columns = [c for c in header.strip().split(',') if c.startswith('opsgenie_')]
-    r.check(f'[{label}] OpsGenie CSV columns {"present" if expect_opsgenie else "absent"}',
-            bool(opsgenie_columns) == expect_opsgenie,
-            f'{len(opsgenie_columns)} column(s)')
+    # CSV keeps the per-tool columns rather than the merged view, so a
+    # spreadsheet can watch the migration move between them.
+    columns = header.strip().split(',')
+    for prefix, source in (('opsgenie_', 'opsgenie_metrics'),
+                           ('grafana_irm_', 'grafana_irm_metrics')):
+        present = [c for c in columns if c.startswith(prefix)]
+        expected = any(isinstance(v, dict) and v
+                       for v in metrics.get(source, {}).values())
+        r.check(f'[{label}] {prefix}* CSV columns '
+                f'{"present" if expected else "absent"}',
+                bool(present) == expected, f'{len(present)} column(s)')
+
+    r.check(f'[{label}] IRM contributes no escalation columns',
+            not any(c.startswith('grafana_irm_escalated') for c in columns))
 
     return report
 
@@ -57,22 +76,58 @@ def run_case(label, metrics, expect_opsgenie):
 r.section('all sources populated')
 full = run_case('full', sample_metrics(), True)
 r.check('[full] alert counts appear in the summary',
-        'OpsGenie Alerts:' in full and 'acknowledged' in full)
+        'Alert Response:' in full and 'acknowledged' in full)
 r.check('[full] on-call burden appears', 'On-Call Burden:' in full)
 r.check('[full] both escalation directions are labelled',
         'escalated onward' in full and 'received by escalation' in full)
-r.check('[full] per-member OpsGenie section appears',
-        full.count('**OpsGenie Alerts:**') >= 3)
+r.check('[full] per-member alert section appears',
+        full.count('**Alerts Handled:**') >= 3)
 r.check('[full] display names are used, not raw ids', 'J. Smith' in full)
 
-r.section('OpsGenie absent entirely (pre-existing behaviour preserved)')
+r.section('both alerting tools absent (pre-existing behaviour preserved)')
 without = sample_metrics()
 without.pop('opsgenie_metrics')
-run_case('no_opsgenie', without, False)
+without.pop('grafana_irm_metrics')
+run_case('no_alerting', without, False)
 
-r.section('OpsGenie collector errored')
+r.section('only OpsGenie configured (the pre-migration setup)')
+opsgenie_only = sample_metrics()
+opsgenie_only.pop('grafana_irm_metrics')
+og_report = run_case('opsgenie_only', opsgenie_only, True)
+r.check('[opsgenie_only] alert numbers survive without IRM',
+        'Alert Response:' in og_report)
+
+r.section('only Grafana IRM configured (the post-migration setup)')
+irm_only = sample_metrics()
+irm_only.pop('opsgenie_metrics')
+irm_report = run_case('irm_only', irm_only, True)
+r.check('[irm_only] alert numbers survive without OpsGenie',
+        'Alert Response:' in irm_report)
+# IRM records no escalations, so the merged view must not invent any.
+r.check('[irm_only] no escalation line without a source for it',
+        'escalated onward' not in irm_report)
+
+r.section('the migration case: both tools live at once')
+# The whole point of merging: a person who acknowledged in both tools shows one
+# combined count, not two halves in two places.
+both = TeamMetricsReportGenerator(sample_metrics()).alert_metrics
+merged_acks = both['jsmith']['alert_response']['acknowledged']
+r.equals('acknowledgements from both tools are summed', merged_acks, 48 + 6)
+r.equals('escalations come from whichever tool records them',
+         both['jsmith']['escalations']['escalated_by'], 3)
+r.equals('IRM severities and OpsGenie priorities sit side by side',
+         sorted(both['jsmith']['alert_distribution']['priority_distribution']),
+         ['P1', 'P2', 'P3', 'critical', 'warning'])
+
+r.section('one alerting collector errored, the other still reports')
+half_errored = sample_metrics()
+half_errored['opsgenie_metrics'] = {'error': 'HTTPError: 401 Unauthorized'}
+run_case('opsgenie_errored', half_errored, True)
+
+r.section('both alerting collectors errored')
 errored = sample_metrics()
 errored['opsgenie_metrics'] = {'error': 'HTTPError: 401 Unauthorized'}
+errored['grafana_irm_metrics'] = {'error': 'HTTPError: 403 Forbidden'}
 run_case('errored', errored, False)
 
 r.section('OpsGenie present but no escalations recorded')
@@ -81,7 +136,7 @@ for data in no_escalations['opsgenie_metrics'].values():
     data['escalations'] = {'escalated_by': 0, 'escalated_to': 0}
 run_case('no_escalations', no_escalations, True)
 
-r.section('ZenDesk empty while OpsGenie has data')
+r.section('ZenDesk empty while the alerting tools have data')
 no_zendesk = sample_metrics()
 no_zendesk['zendesk_metrics'] = {}
 run_case('no_zendesk', no_zendesk, True)
@@ -123,7 +178,7 @@ sparse['gitea_metrics']['lchen'] = {
     'actions': {'total_runs': 0},
 }
 for source in ('jenkins_metrics', 'argocd_metrics', 'jira_metrics', 'zendesk_metrics',
-               'opsgenie_metrics'):
+               'opsgenie_metrics', 'grafana_irm_metrics'):
     sparse[source]['lchen'] = {}
     sparse[source]['aramirez'] = {}
 sparse['gitea_metrics']['aramirez'] = {}
@@ -135,7 +190,7 @@ sections = dict(zip(('lead', 'jsmith', 'aramirez', 'lchen'),
 
 r.check('an active member still shows every source they touched',
         all(label in sections['jsmith'] for label in
-            ('Code Commits', 'Pull Requests', 'Jira Tickets', 'OpsGenie Alerts')))
+            ('Code Commits', 'Pull Requests', 'Jira Tickets', 'Alerts Handled')))
 r.equals('a member with only commits shows only that line',
          [line.split(':**')[0] for line in sections['lchen'].splitlines()
           if line.startswith('**')],
@@ -163,6 +218,9 @@ r.section('zero counts inside a composite line are dropped too')
 # Real data is full of these: an engineer who acknowledged alerts but closed none,
 # or triggered Actions runs with nothing manual. The line stays, the zeros go.
 trimmed = sample_metrics()
+# Isolated to one alerting tool so the expected strings stay exact; the merge is
+# covered above.
+trimmed.pop('grafana_irm_metrics')
 trimmed['gitea_metrics']['jsmith']['actions'] = {'total_runs': 4, 'manual_runs': 0,
                                                 'success_rate': 100.0}
 trimmed['zendesk_metrics']['jsmith']['collaboration'].update(
@@ -183,14 +241,15 @@ r.check('no "0 manual" on the Actions run count',
 r.check('an all-public comment count drops the internal half',
         '(2 public)' in line('**ZenDesk Support:'), line('**ZenDesk Support:'))
 r.check('alerts acknowledged but not closed says only what happened',
-        line('**OpsGenie Alerts:').startswith('**OpsGenie Alerts:** 3 acknowledged on 3 alerts'),
-        line('**OpsGenie Alerts:'))
+        line('**Alerts Handled:').startswith('**Alerts Handled:** 3 acknowledged on 3 alerts'),
+        line('**Alerts Handled:'))
 r.check('a one-sided out-of-hours count drops the zero side',
         line('**Out-of-Hours Alerts:') == '**Out-of-Hours Alerts:** 1 after-hours',
         line('**Out-of-Hours Alerts:'))
 
 r.section('counts agree with their nouns')
 singular = sample_metrics()
+singular.pop('grafana_irm_metrics')
 singular['gitea_metrics']['jsmith']['contributions']['repos_contributed'] = ['infra']
 singular['gitea_metrics']['jsmith']['pull_requests']['reviewed'] = 1
 singular['jira_metrics']['jsmith']['comment_activity'] = {'total_comments': 1}
@@ -200,7 +259,7 @@ one = TeamMetricsReportGenerator(singular).generate_individual_reports().split('
 for prefix, expected in (('**Code Commits:', '1 repository'),
                          ('**Code Reviews:', '1 review performed'),
                          ('**Jira Tickets:', '1 comment,'),
-                         ('**OpsGenie Alerts:', '1 alert touched')):
+                         ('**Alerts Handled:', '1 alert touched')):
     r.check(f'{expected!r} is not pluralized', expected in line(prefix, one), line(prefix, one))
 r.check('plurals still pluralize',
         '9 reviews performed' in TeamMetricsReportGenerator(sample_metrics())
@@ -209,10 +268,11 @@ r.check('plurals still pluralize',
 r.section('a failed collector never masquerades as a team member')
 errored = sample_metrics()
 errored['opsgenie_metrics'] = {'error': 'boom'}
+errored['grafana_irm_metrics'] = {'error': 'boom'}
 generator = TeamMetricsReportGenerator(errored)
 r.equals('error payload filtered out of per-member metrics',
-         generator.opsgenie_metrics, {})
+         generator.alert_metrics, {})
 r.check('and does not appear as a member named "error"',
-        'error' not in generator.opsgenie_metrics)
+        'error' not in generator.alert_metrics)
 
 r.exit()

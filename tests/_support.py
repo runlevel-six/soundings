@@ -159,9 +159,26 @@ def sample_metrics(members=None) -> dict:
                                    'assigned': 1, 'alerts_involved': ack + 2},
                 'escalations': {'escalated_by': eby, 'escalated_to': eto},
                 'response_times': {'avg_ack_minutes': avg, 'median_ack_minutes': avg - 1.5,
-                                   'slowest_ack_minutes': avg * 4, 'acks_measured': ack},
+                                   'slowest_ack_minutes': avg * 4, 'acks_measured': ack,
+                                   'ack_minutes': [avg - 1.5] * (ack - 1) + [avg * 4]
+                                   if ack else []},
                 'alert_distribution': {'priority_distribution': {'P1': 2, 'P2': 5,
                                                                  'P3': max(ack - 7, 0)}},
+                'on_call_burden': {'after_hours_alerts': ah, 'weekend_alerts': we},
+            }),
+        # Grafana IRM runs alongside OpsGenie during the migration. Its schema is
+        # deliberately a subset: no escalations block, no notes/assigned counts,
+        # because the IRM API records none of those.
+        'grafana_irm_metrics': per_member(
+            [(6, 5, 3.0, 2, 1), (3, 2, 7.5, 1, 0), (1, 1, 2.0, 0, 0)],
+            lambda ack, closed, avg, ah, we: {
+                'alert_response': {'acknowledged': ack, 'closed': closed,
+                                   'alerts_involved': ack + 1},
+                'response_times': {'avg_ack_minutes': avg, 'median_ack_minutes': avg,
+                                   'slowest_ack_minutes': avg, 'acks_measured': ack,
+                                   'ack_minutes': [avg] * ack},
+                'alert_distribution': {'priority_distribution': {'critical': 1,
+                                                                 'warning': max(ack - 1, 0)}},
                 'on_call_burden': {'after_hours_alerts': ah, 'weekend_alerts': we},
             }),
     }

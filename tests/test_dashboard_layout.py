@@ -94,12 +94,15 @@ metrics = sample_metrics()
 # Zero out escalations so that panel drops, leaving 7.
 for data in metrics['opsgenie_metrics'].values():
     data['escalations'] = {'escalated_by': 0, 'escalated_to': 0}
+# Grafana IRM reports no escalations at all, so the merged panel must stay empty
+# rather than being revived by the second source.
+metrics.pop('grafana_irm_metrics', None)
 
 generator = TeamMetricsReportGenerator(metrics)
 builders = [generator._panel_commits, generator._panel_pull_requests,
             generator._panel_code_reviews, generator._panel_deployments,
             generator._panel_jira, generator._panel_zendesk,
-            generator._panel_opsgenie_response, generator._panel_opsgenie_escalations]
+            generator._panel_alert_response, generator._panel_alert_escalations]
 panels = [p for p in (build(MEMBERS) for build in builders) if p]
 
 r.equals('7 panels have data', len(panels), 7)

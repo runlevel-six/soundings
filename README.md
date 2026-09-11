@@ -4,7 +4,7 @@
 
 <p align="center">
 **Weekly team activity digest across Gitea, GitHub, Jenkins, ArgoCD, Jira,
-ZenDesk, and OpsGenie.**
+ZenDesk, OpsGenie, and Grafana IRM.**
 </p>
 
 Taking soundings means measuring the same water repeatedly to learn its shape.
@@ -25,7 +25,7 @@ soundings/
 ├── team.example.json         # Example team roster (copy to team.json)
 ├── config.py                 # Configuration and constants
 ├── team.py                   # Team roster model and loader
-├── utils.py                  # Utility functions (CSV export, git metric merge)
+├── utils.py                  # Utility functions (CSV export, git/alert metric merge)
 ├── gitea_collector.py        # Gitea metrics collector
 ├── github_collector.py       # GitHub metrics collector (merged with Gitea)
 ├── jenkins_collector.py      # Jenkins metrics collector
@@ -33,12 +33,14 @@ soundings/
 ├── jira_collectors.py        # Jira API and CSV collectors
 ├── zendesk_collector.py      # ZenDesk metrics collector
 ├── opsgenie_collector.py     # OpsGenie alert response collector
+├── grafana_irm_collector.py  # Grafana IRM alert response collector
 ├── report_generator.py       # Visual report generation
 ├── main_collector.py         # Main orchestrator and CLI
 ├── requirements.txt          # Python dependencies
 ├── tests/                    # Dependency-free test scripts (see tests/README.md)
 │   ├── run_all.py            # Runs every test_*.py; non-zero exit on failure
-│   └── smoke_opsgenie.py     # Live OpsGenie check; needs real credentials
+│   ├── smoke_opsgenie.py     # Live OpsGenie check; needs real credentials
+│   └── smoke_grafana_irm.py  # Live Grafana IRM check; needs real credentials
 ├── tools/
 │   └── scan_identifiers.py   # Fails if a tracked file names a real person
 ├── .githooks/
@@ -121,10 +123,14 @@ single set of metrics.
   but as `jenosidanian` on repositories synced from GitHub into
   Gitea; both are attributed to him. Aliases may be usernames or commit emails.
 - Valid source keys are: `gitea`, `github`, `jenkins`, `argocd`, `jira`,
-  `zendesk`, `opsgenie`, plus `default`.
+  `zendesk`, `opsgenie`, `grafana_irm`, plus `default`.
 - OpsGenie usernames are usually full email addresses. A bare username in the
   roster is tried as-is first, then expanded with `OPSGENIE_EMAIL_DOMAIN`, so
   most rosters need no `opsgenie` entry at all.
+- Grafana IRM logins may be a username or an email depending on how the stack
+  authenticates. Each alias is matched against IRM's `username` and `email`
+  fields, tried bare and as `alias@GRAFANA_IRM_EMAIL_DOMAIN`, so most rosters
+  need no `grafana_irm` entry either.
 - **`timezone`** (optional, IANA name like `America/Chicago`) sets what counts as
   after-hours for that person. Anyone without one falls back to
   `DEVOPS_METRICS_DEFAULT_TIMEZONE` (itself defaulting to UTC). Set this for a
@@ -264,7 +270,7 @@ python main_collector.py --days 90 --format json csv --reports
 
 ### API-Based Collectors
 
-Gitea, GitHub, Jenkins, ArgoCD, ZenDesk, and OpsGenie collectors
+Gitea, GitHub, Jenkins, ArgoCD, ZenDesk, OpsGenie, and Grafana IRM collectors
 automatically filter data based on the `--days` parameter (or `--from`/`--to`
 date range). When you specify `--days 30`, they will only collect
 data from the last 30 days. When you specify an explicit date
@@ -390,10 +396,110 @@ per person per run are capped (`MAX_ALERTS_PER_MEMBER` in
 warning naming the affected person, so a truncated count is never silent.
 Narrow `--days` if you see one.
 
-> **Note:** OpsGenie is on an Atlassian end-of-life path. This collector is
-> deliberately self-contained so it can be replaced by a Jira Service
-> Management equivalent without touching the report or chart layer — a new
-> collector only needs to return the same metric shape.
+> **Note:** OpsGenie is on an Atlassian end-of-life path, and the team is
+> migrating to Grafana IRM (below). Both collectors can run at once; the report
+> merges their numbers into one alert view.
+
+### Grafana IRM Data Collection (Optional)
+
+The Grafana IRM collector is optional. It is automatically skipped unless both
+`GRAFANA_IRM_TOKEN` and `GRAFANA_IRM_API_URL` are set. It answers the same
+question as the OpsGenie collector — **who actually responded to our alerts** —
+against the tool replacing it.
+
+Per person, it collects:
+
+- **Alert response** — alert groups acknowledged and resolved
+- **Response times** — average, median, and slowest time to acknowledge
+- **On-call burden** — after-hours and weekend alerts handled
+  (same rules as [Out-of-hours buckets](#out-of-hours-buckets) above)
+- **Severity mix** — the spread of alert severities they touched
+
+#### Running alongside OpsGenie during the migration
+
+Both collectors can be configured at the same time, and during a migration they
+should be: alerts land in whichever tool an integration still points at, so
+reporting the two separately would show every person's on-call work split in
+half across two places.
+
+- The **markdown report and dashboard** read one merged alert view (OpsGenie +
+  IRM per person), the same way Gitea and GitHub are merged into unified git
+  totals. No tool name appears in the report, because the numbers are no longer
+  attributable to one.
+- The **JSON and CSV** keep each tool's own figures — `opsgenie_*` and
+  `grafana_irm_*` columns — so a spreadsheet can watch the migration move.
+
+Response times merge exactly rather than being averaged twice over: both
+collectors record their per-alert acknowledgement samples in
+`response_times.ack_minutes`, and the merged average, median, and slowest are
+recomputed from the combined samples. (A metrics JSON written before that field
+existed still merges, but logs that its combined median is an estimate.)
+
+#### What IRM cannot report, and why it is absent rather than zero
+
+OpsGenie exposes a per-alert action log (`/v2/alerts/{id}/logs`) naming the actor
+behind every action. **The Grafana IRM public API has no equivalent.** The only
+attributable actions are the two fields the alert group itself records,
+`acknowledged_by` and `resolved_by`.
+
+So the IRM collector reports no **notes added**, **assigned**, **escalated
+onward**, or **received by escalation** counts. Those keys are *omitted from its
+output entirely* rather than reported as `0`, because a zero would read as
+"nobody escalated anything" when the truth is "this was never measured". The
+merged view takes them from OpsGenie for as long as OpsGenie is still in use, and
+the escalation columns disappear from the report once nothing supplies them.
+
+#### Configuration gotchas
+
+**`GRAFANA_IRM_API_URL` is the OnCall API endpoint, not your stack URL.** Find it
+under **IRM → Settings → Admin & API**; on Grafana Cloud it looks like
+`https://oncall-prod-us-central-0.grafana.net/oncall`. The stack URL you log in
+to (`https://myorg.grafana.net`) serves the Grafana UI, not this API. Setting the
+stack URL here is rejected by `validate_config()`. A pasted `/api/v1` suffix is
+trimmed rather than doubled.
+
+**Two credential types, authenticated differently, and mixing them up looks
+exactly like a bad token:**
+
+| Credential | `Authorization` header | Needs `GRAFANA_IRM_STACK_URL` |
+| ---------- | ---------------------- | ----------------------------- |
+| Grafana service account token (`glsa_…`) | `Bearer <token>` | Yes — sent as `X-Grafana-URL` |
+| Legacy OnCall API key | `<token>` (bare) | No |
+
+Because the wrong form returns a plain `401`, the collector's preflight **tries
+both and logs which one worked**. Setting `GRAFANA_IRM_STACK_URL` is what tells
+it which to try first.
+
+**The token needs two permissions**, not one:
+`grafana-oncall-app.alert-groups:read` and
+`grafana-oncall-app.user-settings:read`.
+
+The second is not optional here, which is the main difference from the OpsGenie
+collector. Alert groups name their actors by **opaque OnCall user id**
+(`U4DNY931HHJS5`), so a roster alias means nothing until `/api/v1/users/`
+resolves it. Where the OpsGenie collector degrades to username matching when it
+cannot read users, this one has nothing to degrade to — so it **fails loudly and
+names the missing permission** instead of returning a page of zeros.
+
+**Severity is a free-form label.** IRM has no fixed P1–P5 scale, so
+`GRAFANA_IRM_SEVERITY_LABEL` (default `severity`) names the alert group label to
+read. If no such label is set, the triggering payload is checked
+(`labels.severity`, `commonLabels.severity`, `severity`), and anything still
+unresolved is recorded as `unknown` rather than dropped. In the merged
+distribution, IRM's severity names and OpsGenie's P1–P5 sit side by side rather
+than one being mapped onto the other — any such mapping would be invented by this
+tool rather than configured by whoever set the two systems up.
+
+#### Collection cost
+
+Cheaper than OpsGenie's. The alert groups endpoint takes no per-user filter, so
+alert groups are fetched **once for the whole team** and attributed locally,
+rather than once per member plus one request per alert. A run costs the user
+directory plus one page per 100 alert groups. The team-wide cap is
+`MAX_ALERT_GROUPS` in `grafana_irm_collector.py` (default 5000); hitting it logs
+a warning rather than truncating silently. Grafana's limit is 300 requests per
+5 minutes per token, and a `429` is reported explicitly so it is never mistaken
+for "no data".
 
 ### Jira Data Collection
 
@@ -428,8 +534,10 @@ export date range to your intended `--days` parameter:
 
 ### New Features
 
-- **Alert Response Attribution**: OpsGenie ack/close/escalate credited to
-  the person who took the action, with escalations tracked in both directions
+- **Alert Response Attribution**: OpsGenie and Grafana IRM ack/close/escalate
+  credited to the person who took the action, with escalations tracked in both
+  directions, and the two tools merged into one alert view while the team
+  migrates between them
 - **Self-Sizing Dashboard**: The chart grid grows to fit whichever sources
   returned data — sources that are absent or empty no longer leave blank panels
 - **Chat-Postable Outputs**: Both the dashboard and the report are sized to

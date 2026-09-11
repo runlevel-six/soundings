@@ -7,7 +7,7 @@ import json
 import logging
 import requests
 from datetime import datetime, time, timezone
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Local working day used to classify out-of-hours activity, as (start, end).
@@ -297,6 +297,168 @@ def merge_git_metrics(gitea: Dict[str, Any], github: Dict[str, Any]) -> Dict[str
     return merged
 
 
+def merge_alert_metrics(opsgenie: Dict[str, Any],
+                        grafana_irm: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine OpsGenie and Grafana IRM per-member metrics into one alert view.
+
+    The team is migrating from OpsGenie to Grafana IRM, so for as long as both
+    are live a person's on-call work is split across two tools. Reporting them
+    separately would halve every number in the part of the report people actually
+    read, so this rolls them up the same way ``merge_git_metrics`` rolls up Gitea
+    and GitHub. Raw per-tool dicts stay in the JSON and CSV output.
+
+    The two schemas are not identical, and that is deliberate: IRM's public API
+    has no action log, so it reports no escalation, notes, or assignment counts
+    at all rather than reporting them as zero. Those keys are therefore absent
+    from the IRM side and the merged total carries whatever OpsGenie contributed
+    — which is the honest answer while OpsGenie is still handling those alerts.
+
+    Response times are recombined from the per-alert samples both collectors
+    record in ``response_times.ack_minutes`` rather than averaged from the two
+    summaries, so the merged average, median, and slowest are exact rather than
+    an average of averages.
+
+    If one source is empty the other is returned unchanged (so a run with only
+    OpsGenie configured behaves exactly as before).
+    """
+    if not grafana_irm:
+        return opsgenie
+    if not opsgenie:
+        return grafana_irm
+
+    def _combine(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+        resp_a = a.get('alert_response', {})
+        resp_b = b.get('alert_response', {})
+
+        esc_a = a.get('escalations', {})
+        esc_b = b.get('escalations', {})
+
+        burden_a = a.get('on_call_burden', {})
+        burden_b = b.get('on_call_burden', {})
+
+        dist_a = a.get('alert_distribution', {}).get('priority_distribution', {})
+        dist_b = b.get('alert_distribution', {}).get('priority_distribution', {})
+        # OpsGenie contributes P1-P5, IRM contributes its own severity labels;
+        # they are summed side by side rather than mapped onto one scale, because
+        # any mapping between them would be invented here rather than configured
+        # by the people who set the two tools up.
+        priority_distribution = dict(dist_a)
+        for key, count in dist_b.items():
+            priority_distribution[key] = priority_distribution.get(key, 0) + count
+
+        return {
+            'alert_response': {
+                'acknowledged': resp_a.get('acknowledged', 0) + resp_b.get('acknowledged', 0),
+                'closed': resp_a.get('closed', 0) + resp_b.get('closed', 0),
+                'notes_added': resp_a.get('notes_added', 0) + resp_b.get('notes_added', 0),
+                'assigned': resp_a.get('assigned', 0) + resp_b.get('assigned', 0),
+                'alerts_involved': resp_a.get('alerts_involved', 0) + resp_b.get('alerts_involved', 0),
+            },
+            'escalations': {
+                'escalated_by': esc_a.get('escalated_by', 0) + esc_b.get('escalated_by', 0),
+                'escalated_to': esc_a.get('escalated_to', 0) + esc_b.get('escalated_to', 0),
+            },
+            'response_times': _merge_response_times(a.get('response_times', {}),
+                                                    b.get('response_times', {})),
+            'alert_distribution': {
+                'priority_distribution': priority_distribution,
+            },
+            'on_call_burden': {
+                'after_hours_alerts': burden_a.get('after_hours_alerts', 0) +
+                                      burden_b.get('after_hours_alerts', 0),
+                'weekend_alerts': burden_a.get('weekend_alerts', 0) +
+                                  burden_b.get('weekend_alerts', 0),
+            },
+        }
+
+    # Preserve member order (OpsGenie order first, then any IRM-only members) so
+    # downstream charts/tables keep a stable layout.
+    ordered_members = list(opsgenie) + [m for m in grafana_irm if m not in opsgenie]
+    merged: Dict[str, Any] = {}
+    for member in ordered_members:
+        merged[member] = _combine(opsgenie.get(member, {}), grafana_irm.get(member, {}))
+    return merged
+
+
+def _merge_response_times(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine two response_times blocks, exactly where the samples allow it.
+
+    Both collectors record the per-alert ``ack_minutes`` samples alongside their
+    summary, so the normal path recombines those and is exact.
+
+    A metrics JSON written before ``ack_minutes`` existed has the summary but not
+    the samples, and regenerating a report from one of those files must not
+    silently report zero. So a side that measured acknowledgements without
+    recording their samples falls back to a weighted reconstruction: the mean and
+    the slowest are still exact, while the median can only be estimated, because
+    a median cannot be recovered from two medians. The estimate is flagged in the
+    log rather than passed off as the real thing.
+    """
+    def samples(block: Dict[str, Any]) -> Optional[List[float]]:
+        recorded = block.get('ack_minutes')
+        if recorded is not None:
+            return list(recorded)
+        # No samples recorded and none needed: an empty summary merges cleanly.
+        return [] if not block.get('acks_measured') else None
+
+    a_samples, b_samples = samples(a), samples(b)
+    if a_samples is not None and b_samples is not None:
+        return summarize_ack_minutes(a_samples + b_samples)
+
+    a_count = a.get('acks_measured', 0)
+    b_count = b.get('acks_measured', 0)
+    total = a_count + b_count
+    if total == 0:
+        return summarize_ack_minutes([])
+
+    logger.warning(
+        "Merging alert response times from a metrics file that predates per-alert "
+        "ack_minutes samples; the combined median is an estimate. Re-run the "
+        "collection for exact figures.")
+
+    def weighted(key: str) -> float:
+        return (a.get(key, 0) * a_count + b.get(key, 0) * b_count) / total
+
+    return {
+        'avg_ack_minutes': round(weighted('avg_ack_minutes'), 2),
+        'median_ack_minutes': round(weighted('median_ack_minutes'), 2),
+        'slowest_ack_minutes': round(max(a.get('slowest_ack_minutes', 0),
+                                         b.get('slowest_ack_minutes', 0)), 2),
+        'acks_measured': total,
+        # Deliberately no ack_minutes: there are none to carry, and an empty list
+        # here would claim the samples exist and were all dropped.
+    }
+
+
+def summarize_ack_minutes(minutes: List[float]) -> Dict[str, Any]:
+    """Summarize per-alert acknowledgement times into the response_times block.
+
+    Shared by both alerting collectors and by :func:`merge_alert_metrics` so the
+    merged summary is computed from the combined samples by the same code that
+    produced each source's own, rather than being re-derived from two summaries.
+
+    ``ack_minutes`` is carried through alongside the summary precisely so that
+    merge stays exact: a median cannot be recovered from two medians.
+    """
+    ordered = sorted(minutes)
+    n = len(ordered)
+
+    if n == 0:
+        median = 0.0
+    elif n % 2:
+        median = ordered[n // 2]
+    else:
+        median = (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0
+
+    return {
+        'avg_ack_minutes': round(sum(ordered) / n, 2) if n else 0,
+        'median_ack_minutes': round(median, 2) if n else 0,
+        'slowest_ack_minutes': round(ordered[-1], 2) if n else 0,
+        'acks_measured': n,
+        'ack_minutes': [round(value, 2) for value in ordered],
+    }
+
+
 def export_metrics_to_csv(metrics: Dict[str, Any], output_dir: str) -> str:
     """Export metrics to CSV format for spreadsheet analysis"""
     import csv
@@ -550,6 +712,44 @@ def export_metrics_to_csv(metrics: Dict[str, Any], output_dir: str) -> str:
             burden = opsgenie.get('on_call_burden', {})
             row['opsgenie_after_hours_alerts'] = burden.get('after_hours_alerts', 0)
             row['opsgenie_weekend_alerts'] = burden.get('weekend_alerts', 0)
+
+        # Grafana IRM metrics. Kept as their own columns rather than folded into
+        # the OpsGenie ones so a spreadsheet can show the migration moving; the
+        # markdown report is where the two are merged into one alert view.
+        # There are deliberately no notes/assigned/escalation columns here: the
+        # IRM API does not record those actions, and a zero column would read as
+        # "nobody escalated anything" rather than "this was never measured".
+        if member in metrics.get('grafana_irm_metrics', {}):
+            irm = metrics['grafana_irm_metrics'][member]
+
+            # Alert response
+            response = irm.get('alert_response', {})
+            row['grafana_irm_alerts_acknowledged'] = response.get('acknowledged', 0)
+            row['grafana_irm_alerts_closed'] = response.get('closed', 0)
+            row['grafana_irm_alerts_involved'] = response.get('alerts_involved', 0)
+
+            # Response times
+            times = irm.get('response_times', {})
+            row['grafana_irm_avg_ack_minutes'] = times.get('avg_ack_minutes', 0)
+            row['grafana_irm_median_ack_minutes'] = times.get('median_ack_minutes', 0)
+            row['grafana_irm_slowest_ack_minutes'] = times.get('slowest_ack_minutes', 0)
+            row['grafana_irm_acks_measured'] = times.get('acks_measured', 0)
+
+            # Severity distribution. IRM severity is a free-form label rather
+            # than OpsGenie's fixed P1-P5, so the conventional Grafana Alerting
+            # levels get their own columns and everything else is pooled instead
+            # of silently dropped.
+            severity_dist = irm.get('alert_distribution', {}).get('priority_distribution', {})
+            known = ('critical', 'warning', 'info', 'unknown')
+            for level in known:
+                row[f'grafana_irm_severity_{level}'] = severity_dist.get(level, 0)
+            row['grafana_irm_severity_other'] = sum(
+                count for level, count in severity_dist.items() if level not in known)
+
+            # On-call burden
+            burden = irm.get('on_call_burden', {})
+            row['grafana_irm_after_hours_alerts'] = burden.get('after_hours_alerts', 0)
+            row['grafana_irm_weekend_alerts'] = burden.get('weekend_alerts', 0)
 
         rows.append(row)
 

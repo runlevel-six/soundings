@@ -22,6 +22,7 @@ from argocd_collector import ArgoCDCollector
 from jira_collectors import JiraCollector, JiraCSVCollector
 from zendesk_collector import ZenDeskCollector
 from opsgenie_collector import OpsGenieCollector
+from grafana_irm_collector import GrafanaIRMCollector
 from report_generator import TeamMetricsReportGenerator
 
 
@@ -53,6 +54,13 @@ class TeamMetricsCollector:
         opsgenie_config = config.get('opsgenie', {})
         self.opsgenie = OpsGenieCollector(opsgenie_config) if opsgenie_config.get('api_key') else None
 
+        # Grafana IRM is optional and runs alongside OpsGenie during the
+        # migration — only instantiate if both a token and an API URL are set.
+        irm_config = config.get('grafana_irm', {})
+        self.grafana_irm = (GrafanaIRMCollector(irm_config)
+                            if irm_config.get('token') and irm_config.get('api_url')
+                            else None)
+
     def collect_all_metrics(self, days=90, start=None, end=None) -> Dict[str, Any]:
         """Collect metrics from all tools in parallel with proper error handling"""
         start_date, end_date = get_date_range(days, start=start, end=end)
@@ -79,7 +87,8 @@ class TeamMetricsCollector:
             'argocd_metrics': {},
             'jira_metrics': {},
             'zendesk_metrics': {},
-            'opsgenie_metrics': {}
+            'opsgenie_metrics': {},
+            'grafana_irm_metrics': {}
         }
 
         logger.info(f"Starting metrics collection for team: {member_ids}")
@@ -101,6 +110,9 @@ class TeamMetricsCollector:
 
         if self.opsgenie:
             collectors['opsgenie_metrics'] = ('OpsGenie', lambda: self.opsgenie.collect_team_metrics(members, start_date, end_date))
+
+        if self.grafana_irm:
+            collectors['grafana_irm_metrics'] = ('Grafana IRM', lambda: self.grafana_irm.collect_team_metrics(members, start_date, end_date))
 
         with ThreadPoolExecutor(max_workers=len(collectors)) as executor:
             futures = {}
@@ -204,6 +216,7 @@ class TeamMetricsCollector:
 - Jira metrics: {'✓' if all_metrics.get('jira_metrics') else '✗'}
 - ZenDesk metrics: {'✓' if all_metrics.get('zendesk_metrics') else '✗'}
 - OpsGenie metrics: {'✓' if all_metrics.get('opsgenie_metrics') else '✗'}
+- Grafana IRM metrics: {'✓' if all_metrics.get('grafana_irm_metrics') else '✗'}
 """)
                         logger.info(f"✓ Minimal report created: {minimal_report_file}")
                         readable_file = minimal_report_file

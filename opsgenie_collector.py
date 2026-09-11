@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Set
 
 from utils import (logger, create_session, classify_work_time, resolve_timezone,
-                   parse_business_hours)
+                   parse_business_hours, summarize_ack_minutes)
 from team import TeamMember
 
 # Maximum alerts fetched per member per run. OpsGenie's search endpoint pages at
@@ -517,7 +517,13 @@ class OpsGenieCollector:
 
     def _analyze_response_times(self, alerts: List[Dict[str, Any]],
                                 actions: Dict[str, Any]) -> Dict[str, Any]:
-        """Time from alert creation to this member's acknowledgement."""
+        """Time from alert creation to this member's acknowledgement.
+
+        The per-alert samples are carried through in the summary alongside the
+        averages, so that ``merge_alert_metrics`` can combine this block with the
+        Grafana IRM one exactly — a merged median cannot be recovered from two
+        medians.
+        """
         ack_minutes = []
         created_lookup = {a['id']: self._epoch_ms(a.get('createdAt'))
                           for a in alerts if a.get('id')}
@@ -528,24 +534,7 @@ class OpsGenieCollector:
                 continue
             ack_minutes.append((ack_ms - created_ms) / 60000.0)
 
-        ack_minutes.sort()
-        return {
-            'avg_ack_minutes': round(sum(ack_minutes) / len(ack_minutes), 2) if ack_minutes else 0,
-            'median_ack_minutes': round(self._median(ack_minutes), 2) if ack_minutes else 0,
-            'slowest_ack_minutes': round(ack_minutes[-1], 2) if ack_minutes else 0,
-            'acks_measured': len(ack_minutes),
-        }
-
-    @staticmethod
-    def _median(sorted_values: List[float]) -> float:
-        """Median of an already-sorted list (empty list returns 0)."""
-        n = len(sorted_values)
-        if n == 0:
-            return 0.0
-        mid = n // 2
-        if n % 2:
-            return sorted_values[mid]
-        return (sorted_values[mid - 1] + sorted_values[mid]) / 2.0
+        return summarize_ack_minutes(ack_minutes)
 
     def _analyze_alert_distribution(self, alerts: List[Dict[str, Any]],
                                     actions: Dict[str, Any]) -> Dict[str, Any]:
@@ -609,10 +598,7 @@ class OpsGenieCollector:
             'escalations': {
                 'escalated_by': 0, 'escalated_to': 0,
             },
-            'response_times': {
-                'avg_ack_minutes': 0, 'median_ack_minutes': 0,
-                'slowest_ack_minutes': 0, 'acks_measured': 0,
-            },
+            'response_times': summarize_ack_minutes([]),
             'alert_distribution': {
                 'priority_distribution': {},
             },

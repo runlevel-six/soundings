@@ -10,7 +10,7 @@ import seaborn as sns
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from utils import logger, merge_git_metrics
+from utils import logger, merge_git_metrics, merge_alert_metrics
 
 # Dashboard layout. Panels are laid out into a fixed number of columns and as
 # many rows as needed, because the PNG is scaled to the reader's page width when
@@ -62,15 +62,36 @@ class TeamMetricsReportGenerator:
             for user_data in zendesk_metrics.values()
         )
 
-        # Per-member OpsGenie metrics, with a failed-collector payload stripped.
-        self.opsgenie_metrics = self._member_metrics('opsgenie_metrics')
+        # Unified alert view: OpsGenie + Grafana IRM combined per member. The
+        # team is migrating between the two, so every alert chart, table, and
+        # insight reads this and a person's on-call work rolls up regardless of
+        # which tool handled the page. Raw per-tool dicts stay in the JSON and
+        # CSV output. Failed-collector payloads are stripped from each side
+        # first, so one tool erroring leaves the other's numbers intact.
+        self.alert_metrics = merge_alert_metrics(
+            self._member_metrics('opsgenie_metrics'),
+            self._member_metrics('grafana_irm_metrics'),
+        )
 
-        # Detect whether any OpsGenie alert activity was collected. OpsGenie is
-        # optional, so its columns and lines stay out of the report entirely
-        # rather than showing a wall of zeros.
-        self.has_opsgenie_data = any(
+        # Detect whether any alert activity was collected at all. Both alerting
+        # sources are optional, so their columns and lines stay out of the report
+        # entirely rather than showing a wall of zeros.
+        self.has_alert_data = any(
             user_data.get('alert_response', {}).get('alerts_involved', 0) > 0
-            for user_data in self.opsgenie_metrics.values()
+            for user_data in self.alert_metrics.values()
+        )
+
+        # Escalations are tracked separately from the rest of the alert view
+        # because only OpsGenie records them: the Grafana IRM API exposes no
+        # escalation history at all. Once the migration finishes there will be no
+        # source for these counts, and a column of zeros would read as "nobody
+        # escalated anything" rather than "this is no longer measured" — so the
+        # escalation column pair and summary phrase drop out when nothing
+        # recorded any.
+        self.has_escalation_data = any(
+            user_data.get('escalations', {}).get('escalated_by', 0) > 0 or
+            user_data.get('escalations', {}).get('escalated_to', 0) > 0
+            for user_data in self.alert_metrics.values()
         )
 
         # Set up visualization style
@@ -207,50 +228,54 @@ class TeamMetricsReportGenerator:
         ]
         avg_team_csat = sum(csat_scores) / len(csat_scores) if csat_scores else 0
 
-        # OpsGenie alert response metrics
-        opsgenie_metrics = self.opsgenie_metrics
-        total_og_acknowledged = sum(
+        # Alert response metrics (OpsGenie + Grafana IRM combined)
+        alert_metrics = self.alert_metrics
+        total_alert_acknowledged = sum(
             user_data.get('alert_response', {}).get('acknowledged', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
-        total_og_closed = sum(
+        total_alert_closed = sum(
             user_data.get('alert_response', {}).get('closed', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
-        total_og_escalated_by = sum(
+        total_alert_escalated_by = sum(
             user_data.get('escalations', {}).get('escalated_by', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
-        total_og_escalated_to = sum(
+        total_alert_escalated_to = sum(
             user_data.get('escalations', {}).get('escalated_to', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
-        total_og_after_hours = sum(
+        total_alert_after_hours = sum(
             user_data.get('on_call_burden', {}).get('after_hours_alerts', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
-        total_og_weekend = sum(
+        total_alert_weekend = sum(
             user_data.get('on_call_burden', {}).get('weekend_alerts', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
         )
         # Average of each responder's own average, so one very busy person does
         # not dominate the team figure.
-        og_ack_times = [
+        alert_ack_times = [
             user_data.get('response_times', {}).get('avg_ack_minutes', 0)
-            for user_data in opsgenie_metrics.values()
+            for user_data in alert_metrics.values()
             if user_data.get('response_times', {}).get('acks_measured', 0) > 0
         ]
-        avg_og_ack_minutes = sum(og_ack_times) / len(og_ack_times) if og_ack_times else 0
+        avg_alert_ack_minutes = sum(alert_ack_times) / len(alert_ack_times) if alert_ack_times else 0
 
-        opsgenie_line = ''
-        if self.has_opsgenie_data:
-            opsgenie_line = (
-                f"\n- **OpsGenie Alerts:** {total_og_acknowledged:,} acknowledged, "
-                f"{total_og_closed:,} closed, {total_og_escalated_by:,} escalated onward, "
-                f"{total_og_escalated_to:,} received by escalation"
-                f"{f', {avg_og_ack_minutes:.1f} min avg time to acknowledge' if og_ack_times else ''}"
-                f"\n- **On-Call Burden:** {total_og_after_hours:,} after-hours and "
-                f"{total_og_weekend:,} weekend alerts handled"
+        alert_line = ''
+        if self.has_alert_data:
+            escalation_phrase = ''
+            if self.has_escalation_data:
+                escalation_phrase = (
+                    f", {total_alert_escalated_by:,} escalated onward, "
+                    f"{total_alert_escalated_to:,} received by escalation")
+            alert_line = (
+                f"\n- **Alert Response:** {total_alert_acknowledged:,} acknowledged, "
+                f"{total_alert_closed:,} closed{escalation_phrase}"
+                f"{f', {avg_alert_ack_minutes:.1f} min avg time to acknowledge' if alert_ack_times else ''}"
+                f"\n- **On-Call Burden:** {total_alert_after_hours:,} after-hours and "
+                f"{total_alert_weekend:,} weekend alerts handled"
             )
 
         summary = f"""
@@ -267,15 +292,15 @@ class TeamMetricsReportGenerator:
 - **Code Review Activity:** {total_prs_reviewed:,} PRs reviewed (ratio: {review_to_create_ratio:.1f} reviews per PR created)
 - **GitOps Deployments:** {total_argocd_deployments:,} ArgoCD syncs, {total_jenkins_builds:,} Jenkins builds{f', {total_git_actions:,} Git Actions runs' if self.has_actions_data else ''}{f' ({avg_deployment_success:.1f}% combined success rate)' if deployment_success_rates else ''}
 - **Jira Tickets:** {total_tickets_opened:,} opened, {total_tickets_closed:,} closed, {total_tickets_in_progress:,} in progress
-- **ZenDesk Support:** {total_zd_solved:,} tickets solved, {total_zd_comments:,} comments by team{f', {avg_team_csat:.0%} avg CSAT' if self.has_csat_data else ''}{opsgenie_line}
+- **ZenDesk Support:** {total_zd_solved:,} tickets solved, {total_zd_comments:,} comments by team{f', {avg_team_csat:.0%} avg CSAT' if self.has_csat_data else ''}{alert_line}
 
 ### Key Insights
 {self._generate_key_insights()}
 
 ### Team Collaboration Summary Table
 
-| Team Member | Commits | PRs Created | PRs Merged | PRs Reviewed | ArgoCD Syncs | Jenkins Builds |{' Actions Runs |' if self.has_actions_data else ''} Jira Opened | Jira Closed | Jira Comments | ZD Solved | ZD Comments |{' ZD CSAT |' if self.has_csat_data else ''}{' Alerts Ackd | Alerts Closed | Esc. Out | Esc. In |' if self.has_opsgenie_data else ''}
-|-------------|---------|-------------|------------|--------------|--------------|----------------|{'--------------|' if self.has_actions_data else ''} -------------|-------------|---------------|-----------|-------------|{'---------|' if self.has_csat_data else ''}{'--------------|---------------|----------|---------|' if self.has_opsgenie_data else ''}
+| Team Member | Commits | PRs Created | PRs Merged | PRs Reviewed | ArgoCD Syncs | Jenkins Builds |{' Actions Runs |' if self.has_actions_data else ''} Jira Opened | Jira Closed | Jira Comments | ZD Solved | ZD Comments |{' ZD CSAT |' if self.has_csat_data else ''}{' Alerts Ackd | Alerts Closed |' if self.has_alert_data else ''}{' Esc. Out | Esc. In |' if self.has_escalation_data else ''}
+|-------------|---------|-------------|------------|--------------|--------------|----------------|{'--------------|' if self.has_actions_data else ''} -------------|-------------|---------------|-----------|-------------|{'---------|' if self.has_csat_data else ''}{'--------------|---------------|' if self.has_alert_data else ''}{'----------|---------|' if self.has_escalation_data else ''}
 {self._generate_team_table()}
 """
         return summary
@@ -326,17 +351,18 @@ class TeamMetricsReportGenerator:
                 zd_csat_str = f"{zd_csat['avg_csat_score']:.0%}" if zd_csat.get('csat_responses', 0) > 0 else "N/A"
                 csat_col = f" {zd_csat_str} |"
 
-            opsgenie_cols = ''
-            if self.has_opsgenie_data:
-                og_data = self.opsgenie_metrics.get(member, {})
-                og_response = og_data.get('alert_response', {})
-                og_escalations = og_data.get('escalations', {})
-                opsgenie_cols = (f" {og_response.get('acknowledged', 0)} |"
-                                 f" {og_response.get('closed', 0)} |"
-                                 f" {og_escalations.get('escalated_by', 0)} |"
-                                 f" {og_escalations.get('escalated_to', 0)} |")
+            alert_cols = ''
+            if self.has_alert_data:
+                alert_data = self.alert_metrics.get(member, {})
+                alert_response = alert_data.get('alert_response', {})
+                alert_escalations = alert_data.get('escalations', {})
+                alert_cols = (f" {alert_response.get('acknowledged', 0)} |"
+                              f" {alert_response.get('closed', 0)} |")
+                if self.has_escalation_data:
+                    alert_cols += (f" {alert_escalations.get('escalated_by', 0)} |"
+                                   f" {alert_escalations.get('escalated_to', 0)} |")
 
-            table_rows.append(f"| **{self._label(member)}** | {commits:,} | {prs_created} | {prs_merged} ({merge_rate}) | {prs_reviewed} | {syncs} | {jenkins_builds} |{actions_col} {jira_opened} | {jira_closed} | {jira_comments} | {zd_solved} | {zd_comments} |{csat_col}{opsgenie_cols}")
+            table_rows.append(f"| **{self._label(member)}** | {commits:,} | {prs_created} | {prs_merged} ({merge_rate}) | {prs_reviewed} | {syncs} | {jenkins_builds} |{actions_col} {jira_opened} | {jira_closed} | {jira_comments} | {zd_solved} | {zd_comments} |{csat_col}{alert_cols}")
 
         return '\n'.join(table_rows)
 
@@ -427,47 +453,47 @@ class TeamMetricsReportGenerator:
             top_csat = max(zd_csat_scores, key=zd_csat_scores.get)
             insights.append(f"• Highest ZenDesk CSAT: **{self._label(top_csat)}** with {zd_csat_scores[top_csat]:.0%} satisfaction")
 
-        # OpsGenie alert response breakdown
-        opsgenie_metrics = self.opsgenie_metrics
+        # Alert response breakdown (OpsGenie + Grafana IRM combined)
+        alert_metrics = self.alert_metrics
 
-        og_ack_counts = {user: data.get('alert_response', {}).get('acknowledged', 0)
-                         for user, data in opsgenie_metrics.items()}
-        responders = [user for user, count in og_ack_counts.items() if count > 0]
+        alert_ack_counts = {user: data.get('alert_response', {}).get('acknowledged', 0)
+                            for user, data in alert_metrics.items()}
+        responders = [user for user, count in alert_ack_counts.items() if count > 0]
         if responders:
-            ack_details = [f"**{self._label(user)}** ({og_ack_counts[user]})" for user in responders]
+            ack_details = [f"**{self._label(user)}** ({alert_ack_counts[user]})" for user in responders]
             insights.append(f"• Alerts acknowledged: {', '.join(ack_details)}")
 
-        og_closed_counts = {user: data.get('alert_response', {}).get('closed', 0)
-                            for user, data in opsgenie_metrics.items()}
-        if og_closed_counts and max(og_closed_counts.values(), default=0) > 0:
-            top_closer = max(og_closed_counts, key=og_closed_counts.get)
-            insights.append(f"• Most alerts closed: **{self._label(top_closer)}** with {og_closed_counts[top_closer]} alerts")
+        alert_closed_counts = {user: data.get('alert_response', {}).get('closed', 0)
+                               for user, data in alert_metrics.items()}
+        if alert_closed_counts and max(alert_closed_counts.values(), default=0) > 0:
+            top_closer = max(alert_closed_counts, key=alert_closed_counts.get)
+            insights.append(f"• Most alerts closed: **{self._label(top_closer)}** with {alert_closed_counts[top_closer]} alerts")
 
         # Escalations received are a rotation signal, not an individual one, so
         # they are reported as a team total with the individual breakdown.
-        og_escalated_to = {user: data.get('escalations', {}).get('escalated_to', 0)
-                           for user, data in opsgenie_metrics.items()}
-        total_escalated_to = sum(og_escalated_to.values())
+        alert_escalated_to = {user: data.get('escalations', {}).get('escalated_to', 0)
+                              for user, data in alert_metrics.items()}
+        total_escalated_to = sum(alert_escalated_to.values())
         if total_escalated_to > 0:
             receivers = [f"**{self._label(user)}** ({count})"
-                         for user, count in og_escalated_to.items() if count > 0]
+                         for user, count in alert_escalated_to.items() if count > 0]
             insights.append(
                 f"• {total_escalated_to} alert(s) reached someone by escalation "
                 f"(first responder did not acknowledge in time): {', '.join(receivers)}")
 
-        og_after_hours = sum(data.get('on_call_burden', {}).get('after_hours_alerts', 0)
-                             for data in opsgenie_metrics.values())
-        og_weekend = sum(data.get('on_call_burden', {}).get('weekend_alerts', 0)
-                         for data in opsgenie_metrics.values())
-        if og_after_hours or og_weekend:
+        alert_after_hours = sum(data.get('on_call_burden', {}).get('after_hours_alerts', 0)
+                                for data in alert_metrics.values())
+        alert_weekend = sum(data.get('on_call_burden', {}).get('weekend_alerts', 0)
+                            for data in alert_metrics.values())
+        if alert_after_hours or alert_weekend:
             burden_by_member = {
                 user: (data.get('on_call_burden', {}).get('after_hours_alerts', 0) +
                        data.get('on_call_burden', {}).get('weekend_alerts', 0))
-                for user, data in opsgenie_metrics.items()
+                for user, data in alert_metrics.items()
             }
             heaviest = max(burden_by_member, key=burden_by_member.get)
             insights.append(
-                f"• Out-of-hours alert load: {og_after_hours} after-hours, {og_weekend} weekend; "
+                f"• Out-of-hours alert load: {alert_after_hours} after-hours, {alert_weekend} weekend; "
                 f"heaviest on **{self._label(heaviest)}** ({burden_by_member[heaviest]})")
 
         return '\n'.join(insights) if insights else "• No activity data available for this period"
@@ -545,51 +571,51 @@ class TeamMetricsReportGenerator:
                 if zd_csat.get('csat_responses', 0) > 0:
                     zd_csat_part = f"CSAT: {zd_csat['avg_csat_score']:.0%}"
 
-            # OpsGenie alert response (omitted entirely when OpsGenie is not in use)
-            opsgenie_lines = []
-            if self.has_opsgenie_data:
-                og_data = self.opsgenie_metrics.get(member, {})
-                og_response = og_data.get('alert_response', {})
-                og_escalations = og_data.get('escalations', {})
-                og_times = og_data.get('response_times', {})
-                og_burden = og_data.get('on_call_burden', {})
+            # Alert response (omitted entirely when no alerting tool is in use)
+            alert_lines = []
+            if self.has_alert_data:
+                alert_data = self.alert_metrics.get(member, {})
+                alert_response = alert_data.get('alert_response', {})
+                alert_escalations = alert_data.get('escalations', {})
+                alert_times = alert_data.get('response_times', {})
+                alert_burden = alert_data.get('on_call_burden', {})
 
-                og_acknowledged = og_response.get('acknowledged', 0)
-                og_closed = og_response.get('closed', 0)
-                og_notes = og_response.get('notes_added', 0)
-                og_involved = og_response.get('alerts_involved', 0)
-                og_esc_by = og_escalations.get('escalated_by', 0)
-                og_esc_to = og_escalations.get('escalated_to', 0)
-                og_after_hours = og_burden.get('after_hours_alerts', 0)
-                og_weekend = og_burden.get('weekend_alerts', 0)
+                alert_acknowledged = alert_response.get('acknowledged', 0)
+                alert_closed = alert_response.get('closed', 0)
+                alert_notes = alert_response.get('notes_added', 0)
+                alert_involved = alert_response.get('alerts_involved', 0)
+                alert_esc_by = alert_escalations.get('escalated_by', 0)
+                alert_esc_to = alert_escalations.get('escalated_to', 0)
+                alert_after_hours = alert_burden.get('after_hours_alerts', 0)
+                alert_weekend = alert_burden.get('weekend_alerts', 0)
 
                 ack_part = ''
-                if og_times.get('acks_measured', 0) > 0:
-                    ack_part = (f", avg time to ack: {og_times.get('avg_ack_minutes', 0):.1f} min "
-                                f"(median {og_times.get('median_ack_minutes', 0):.1f} min)")
+                if alert_times.get('acks_measured', 0) > 0:
+                    ack_part = (f", avg time to ack: {alert_times.get('avg_ack_minutes', 0):.1f} min "
+                                f"(median {alert_times.get('median_ack_minutes', 0):.1f} min)")
 
                 # "N alerts touched" is the anchor the other counts hang off, so
                 # it stays whenever the person appears in an alert log at all.
                 response_parts = [f"{count} {label}" for count, label in (
-                    (og_acknowledged, 'acknowledged'), (og_closed, 'closed'),
-                    (og_notes, 'noted on')) if count]
-                if og_involved or response_parts:
-                    touched = self._count(og_involved, 'alert') + ' touched'
-                    opsgenie_lines.append(
-                        "**OpsGenie Alerts:** "
+                    (alert_acknowledged, 'acknowledged'), (alert_closed, 'closed'),
+                    (alert_notes, 'noted on')) if count]
+                if alert_involved or response_parts:
+                    touched = self._count(alert_involved, 'alert') + ' touched'
+                    alert_lines.append(
+                        "**Alerts Handled:** "
                         + (', '.join(response_parts) + ' on ' if response_parts else '')
                         + f"{touched}{ack_part}")
 
                 escalation_parts = [f"{count} {label}" for count, label in (
-                    (og_esc_by, 'escalated onward'),
-                    (og_esc_to, 'received by escalation')) if count]
+                    (alert_esc_by, 'escalated onward'),
+                    (alert_esc_to, 'received by escalation')) if count]
                 if escalation_parts:
-                    opsgenie_lines.append("**Alert Escalations:** " + ', '.join(escalation_parts))
+                    alert_lines.append("**Alert Escalations:** " + ', '.join(escalation_parts))
 
                 hours_parts = [f"{count} {label}" for count, label in (
-                    (og_after_hours, 'after-hours'), (og_weekend, 'weekend')) if count]
+                    (alert_after_hours, 'after-hours'), (alert_weekend, 'weekend')) if count]
                 if hours_parts:
-                    opsgenie_lines.append("**Out-of-Hours Alerts:** " + ', '.join(hours_parts))
+                    alert_lines.append("**Out-of-Hours Alerts:** " + ', '.join(hours_parts))
 
             # Only lines this person actually registered activity on. A column of
             # zeros says nothing a reader needs, and the report has to fit inside
@@ -651,7 +677,7 @@ class TeamMetricsReportGenerator:
                     zendesk_parts.append(f"avg resolution: {zd_avg_resolution:.1f}h")
                 lines.append("**ZenDesk Support:** " + ', '.join(zendesk_parts))
 
-            lines.extend(opsgenie_lines)
+            lines.extend(alert_lines)
 
             if not lines:
                 lines.append("_No recorded activity in the tracked sources this period._")
@@ -683,8 +709,8 @@ class TeamMetricsReportGenerator:
             self._panel_deployments,
             self._panel_jira,
             self._panel_zendesk,
-            self._panel_opsgenie_response,
-            self._panel_opsgenie_escalations,
+            self._panel_alert_response,
+            self._panel_alert_escalations,
         ]
 
         panels = [panel for panel in (build(members) for build in builders) if panel]
@@ -910,21 +936,21 @@ class TeamMetricsReportGenerator:
             ],
         }
 
-    def _panel_opsgenie_response(self, members: List[str]) -> Optional[Dict[str, Any]]:
+    def _panel_alert_response(self, members: List[str]) -> Optional[Dict[str, Any]]:
         """Who actually worked the alerts."""
-        opsgenie_data = self.opsgenie_metrics
-        if not opsgenie_data:
+        alert_data = self.alert_metrics
+        if not alert_data:
             return None
 
-        acknowledged = [opsgenie_data.get(m, {}).get('alert_response', {}).get('acknowledged', 0)
+        acknowledged = [alert_data.get(m, {}).get('alert_response', {}).get('acknowledged', 0)
                         for m in members]
-        closed = [opsgenie_data.get(m, {}).get('alert_response', {}).get('closed', 0)
+        closed = [alert_data.get(m, {}).get('alert_response', {}).get('closed', 0)
                   for m in members]
 
         if not any(acknowledged) and not any(closed):
             return None
         return {
-            'title': 'OpsGenie Alert Response',
+            'title': 'Alert Response',
             'ylabel': 'Alerts',
             'series': [
                 ('Acknowledged', acknowledged, 'slateblue'),
@@ -932,25 +958,25 @@ class TeamMetricsReportGenerator:
             ],
         }
 
-    def _panel_opsgenie_escalations(self, members: List[str]) -> Optional[Dict[str, Any]]:
+    def _panel_alert_escalations(self, members: List[str]) -> Optional[Dict[str, Any]]:
         """Escalation flow, kept off the response panel on purpose.
 
         Escalation counts are typically an order of magnitude smaller than ack
         counts; sharing an axis with them would flatten both bars to nothing.
         """
-        opsgenie_data = self.opsgenie_metrics
-        if not opsgenie_data:
+        alert_data = self.alert_metrics
+        if not alert_data:
             return None
 
-        escalated_by = [opsgenie_data.get(m, {}).get('escalations', {}).get('escalated_by', 0)
+        escalated_by = [alert_data.get(m, {}).get('escalations', {}).get('escalated_by', 0)
                         for m in members]
-        escalated_to = [opsgenie_data.get(m, {}).get('escalations', {}).get('escalated_to', 0)
+        escalated_to = [alert_data.get(m, {}).get('escalations', {}).get('escalated_to', 0)
                         for m in members]
 
         if not any(escalated_by) and not any(escalated_to):
             return None
         return {
-            'title': 'OpsGenie Escalations (handed off vs. received)',
+            'title': 'Alert Escalations (handed off vs. received)',
             'ylabel': 'Alerts',
             'series': [
                 ('Escalated by them', escalated_by, 'darkorange'),

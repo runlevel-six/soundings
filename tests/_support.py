@@ -137,7 +137,8 @@ def sample_metrics(members=None) -> dict:
             lambda c, n: {'workload_analysis': {'completed_issues': c, 'current_issues': 4,
                                                 'in_progress_issues': 2, 'overdue_issues': 1},
                           'comment_activity': {'total_comments': n},
-                          'collaboration_metrics': {}, 'growth_indicators': {}}),
+                          'collaboration_metrics': {'issues_reported': c + 4},
+                          'growth_indicators': {}}),
         'zendesk_metrics': per_member(
             [(20, 15, 24), (31, 27, 38), (9, 6, 7)],
             lambda a, s, c: {

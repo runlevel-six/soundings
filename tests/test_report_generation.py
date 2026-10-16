@@ -207,12 +207,31 @@ r.section('zero sub-counts drop out of composite lines')
 partial = sample_metrics()
 partial['jira_metrics']['jsmith']['workload_analysis'] = {
     'completed_issues': 5, 'current_issues': 0, 'in_progress_issues': 0, 'overdue_issues': 0}
+partial['jira_metrics']['jsmith']['collaboration_metrics'] = {'issues_reported': 5}
 jira_line = next(line for line in TeamMetricsReportGenerator(partial)
                  .generate_individual_reports().splitlines()
                  if line.startswith('**Jira Tickets:'))
 r.check('no "0 overdue" filler', 'overdue' not in jira_line and 'in progress' not in jira_line)
 r.check('the counts that moved survive', '5 opened' in jira_line and '5 closed' in jira_line,
         jira_line)
+
+r.section('Jira opened means created, not assigned')
+# "Opened" used to be completed + still-assigned, which reads as "tickets I created"
+# but counted tickets handed to the member. Someone who files a backlog of tickets
+# for others showed almost nothing.
+creator = sample_metrics()
+creator['jira_metrics']['jsmith'] = {
+    'workload_analysis': {'completed_issues': 0, 'current_issues': 4,
+                          'in_progress_issues': 3, 'overdue_issues': 0},
+    'collaboration_metrics': {'issues_reported': 41, 'issues_assigned': 4},
+    'comment_activity': {'total_comments': 2}}
+creator_gen = TeamMetricsReportGenerator(creator)
+jira_line = next(line for line in creator_gen.generate_individual_reports().splitlines()
+                 if line.startswith('**Jira Tickets:'))
+r.check('individual line counts reported tickets', '41 opened' in jira_line, jira_line)
+r.check('assigned backlog is not counted as opened', '4 opened' not in jira_line, jira_line)
+r.check('team table Jira Opened is the reported count',
+        any('| 41 | 0 | 2 |' in line for line in creator_gen._generate_team_table().splitlines()))
 
 r.section('zero counts inside a composite line are dropped too')
 # Real data is full of these: an engineer who acknowledged alerts but closed none,

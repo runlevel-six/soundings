@@ -111,6 +111,11 @@ class TeamMetricsReportGenerator:
         """
         return f"{value:,} {singular if value == 1 else (plural or singular + 's')}"
 
+    @staticmethod
+    def _jira_opened(jira_data: Dict[str, Any]) -> int:
+        """Tickets the member created (Reporter), not tickets assigned to them."""
+        return jira_data.get('collaboration_metrics', {}).get('issues_reported', 0)
+
     def _member_metrics(self, source_key: str) -> Dict[str, Any]:
         """Return the per-member metrics for a source, dropping error payloads.
 
@@ -199,9 +204,7 @@ class TeamMetricsReportGenerator:
 
         # Jira ticket metrics
         total_tickets_opened = sum(
-            user_data.get('workload_analysis', {}).get('completed_issues', 0) +
-            user_data.get('workload_analysis', {}).get('current_issues', 0)
-            for user_data in jira_metrics.values()
+            self._jira_opened(user_data) for user_data in jira_metrics.values()
         )
         total_tickets_closed = sum(
             user_data.get('workload_analysis', {}).get('completed_issues', 0)
@@ -332,7 +335,7 @@ class TeamMetricsReportGenerator:
 
             workload = jira_data.get('workload_analysis', {})
             jira_closed = workload.get('completed_issues', 0)
-            jira_opened = jira_closed + workload.get('current_issues', 0)
+            jira_opened = self._jira_opened(jira_data)
             jira_comments = jira_data.get('comment_activity', {}).get('total_comments', 0)
 
             zd_solved = zd_data.get('ticket_activity', {}).get('solved', 0)
@@ -419,7 +422,7 @@ class TeamMetricsReportGenerator:
         for user, data in jira_metrics.items():
             workload = data.get('workload_analysis', {})
             closed = workload.get('completed_issues', 0)
-            opened = closed + workload.get('current_issues', 0)
+            opened = self._jira_opened(data)
             ticket_counts[user] = {'opened': opened, 'closed': closed}
 
         if ticket_counts:
@@ -547,10 +550,9 @@ class TeamMetricsReportGenerator:
             jira_data = jira_metrics.get(member, {})
             workload_data = jira_data.get('workload_analysis', {})
             completed_issues = workload_data.get('completed_issues', 0)
-            current_issues = workload_data.get('current_issues', 0)
             in_progress_issues = workload_data.get('in_progress_issues', 0)
             overdue_issues = workload_data.get('overdue_issues', 0)
-            tickets_opened = completed_issues + current_issues
+            tickets_opened = self._jira_opened(jira_data)
             jira_comments = jira_data.get('comment_activity', {}).get('total_comments', 0)
 
             # ZenDesk activity
@@ -894,10 +896,7 @@ class TeamMetricsReportGenerator:
         if not jira_data:
             return None
 
-        opened = [
-            jira_data.get(m, {}).get('workload_analysis', {}).get('completed_issues', 0) +
-            jira_data.get(m, {}).get('workload_analysis', {}).get('current_issues', 0)
-            for m in members]
+        opened = [self._jira_opened(jira_data.get(m, {})) for m in members]
         closed = [jira_data.get(m, {}).get('workload_analysis', {}).get('completed_issues', 0)
                   for m in members]
         commented = [jira_data.get(m, {}).get('comment_activity', {}).get('total_comments', 0)

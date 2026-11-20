@@ -202,16 +202,18 @@ def parse_jira_date(date_str: str) -> Optional[datetime]:
 
 def calculate_collaboration_score(commits: int, prs_created: int, prs_merged: int, prs_reviewed: int) -> float:
     """Calculate collaboration score based on Git activity"""
-    if commits == 0 and prs_created == 0 and prs_reviewed == 0:
+    if commits == 0 and prs_created == 0 and prs_merged == 0 and prs_reviewed == 0:
         return 0.0
 
     # Score components
     commit_score = min(commits / 50 * 30, 30)  # Max 30 points for commits
     pr_creation_score = min(prs_created / 10 * 25, 25)  # Max 25 points for PR creation
-    merge_rate_score = (prs_merged / prs_created * 20) if prs_created > 0 else 0  # Max 20 points
+    # prs_merged counts PRs this person merged (anyone's), not their own PRs that
+    # got merged, so it is scored as a volume like the others, not as a ratio.
+    merge_score = min(prs_merged / 10 * 20, 20)  # Max 20 points for merging
     review_score = min(prs_reviewed / 15 * 25, 25)  # Max 25 points for reviews
 
-    total_score = commit_score + pr_creation_score + merge_rate_score + review_score
+    total_score = commit_score + pr_creation_score + merge_score + review_score
     return min(total_score, 100.0)
 
 def merge_git_metrics(gitea: Dict[str, Any], github: Dict[str, Any]) -> Dict[str, Any]:

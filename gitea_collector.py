@@ -188,19 +188,34 @@ class GiteaCollector:
                         break
 
                     for pr in pulls:
-                        created_at = parse_datetime_with_timezone(pr.get('created_at', ''))
-                        if not created_at:
-                            continue
                         # Since results are sorted by updated desc, PRs updated before
                         # start_date mean no more relevant results in this state
-                        updated_at = parse_datetime_with_timezone(pr.get('updated_at', ''))
+                        updated_at = parse_datetime_with_timezone(pr.get('updated_at') or '')
                         if updated_at and updated_at < start_date:
                             continue
-                        if not (start_date <= created_at <= end_date):
+
+                        # Keep a PR if it was opened OR merged in the window: "created"
+                        # credits the author, "merged" credits whoever merged it, and a
+                        # PR opened last week can be merged this week.
+                        created_at = parse_datetime_with_timezone(pr.get('created_at') or '')
+                        merged_at = parse_datetime_with_timezone(pr.get('merged_at') or '')
+                        created_in_window = bool(created_at) and start_date <= created_at <= end_date
+                        merged_in_window = bool(merged_at) and start_date <= merged_at <= end_date
+                        if not (created_in_window or merged_in_window):
                             continue
 
-                        # Fetch reviewers and commenters once per PR
-                        reviewers, commenters = self._fetch_pr_participants(repo, pr.get('number'), start_date, end_date)
+                        pr['_created_in_window'] = created_in_window
+                        pr['_merged_in_window'] = merged_in_window
+                        pr['_merged_by'] = (self._fetch_pr_merger(repo, pr)
+                                            if merged_in_window else '')
+
+                        # Review credit stays scoped to PRs opened in the window, as
+                        # before; merge-only PRs don't need the extra participant calls.
+                        if created_in_window:
+                            reviewers, commenters = self._fetch_pr_participants(
+                                repo, pr.get('number'), start_date, end_date)
+                        else:
+                            reviewers, commenters = set(), set()
                         pr['_reviewers'] = reviewers
                         pr['_commenters'] = commenters
                         repo_prs.append(pr)
@@ -213,6 +228,22 @@ class GiteaCollector:
             logger.debug(f"Error fetching PRs for {repo}: {e}")
 
         return repo_prs
+
+    def _fetch_pr_merger(self, repo: str, pr: Dict) -> str:
+        """Return the lowercased login of whoever merged *pr*, or '' if unknown.
+
+        Gitea's pulls list normally includes ``merged_by``; fall back to the
+        single-PR endpoint only when it is missing.
+        """
+        merged_by = pr.get('merged_by')
+        if not merged_by and pr.get('number'):
+            try:
+                detail = safe_api_request(f"{self.base_url}/api/v1/repos/{repo}/pulls/{pr['number']}",
+                                          headers=self.headers, timeout=3, session=self.session)
+                merged_by = (detail or {}).get('merged_by')
+            except Exception:
+                merged_by = None
+        return ((merged_by or {}).get('login') or '').lower()
 
     def _fetch_pr_participants(self, repo: str, pr_number: int, start_date: datetime, end_date: datetime) -> tuple:
         """Fetch reviewers and commenters for a single PR. Returns (reviewer_set, commenter_set)."""
@@ -440,12 +471,17 @@ class GiteaCollector:
 
         for repo in repos:
             for pr in pr_cache.get(repo, []):
-                pr_author = pr.get('user', {}).get('login', '')
-                if matches_exact(pr_author, aliases):
+                # "Created" credits the author; "merged" credits whoever merged the
+                # PR, regardless of who opened it. Each is counted only when that
+                # event happened inside the window.
+                pr_author = (pr.get('user') or {}).get('login', '')
+                if pr.get('_created_in_window', True) and matches_exact(pr_author, aliases):
                     pr_metrics['created'] += 1
-                    if pr.get('merged', False) or (pr.get('state') == 'closed' and pr.get('merged_at')):
-                        pr_metrics['merged'] += 1
+                if pr.get('_merged_in_window') and matches_exact(pr.get('_merged_by', ''), aliases):
+                    pr_metrics['merged'] += 1
 
+                if not pr.get('_created_in_window', True):
+                    continue
                 # Check cached reviewers/commenters instead of making API calls
                 reviewers = pr.get('_reviewers', set())
                 commenters = pr.get('_commenters', set())

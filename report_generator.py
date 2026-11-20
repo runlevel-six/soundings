@@ -169,7 +169,6 @@ class TeamMetricsReportGenerator:
                                     for user_data in gitea_metrics.values())
 
         # Calculate collaboration health metrics
-        pr_merge_rate = (total_prs_merged / total_prs_created * 100) if total_prs_created > 0 else 0
         review_to_create_ratio = (total_prs_reviewed / total_prs_created) if total_prs_created > 0 else 0
 
         # Deployment success rates from ArgoCD
@@ -291,7 +290,7 @@ class TeamMetricsReportGenerator:
 
 ### Key Performance Indicators
 - **Code Commits:** {total_commits:,} commits across all team members
-- **Pull Request Activity:** {total_prs_created:,} PRs created, {total_prs_merged:,} merged ({pr_merge_rate:.1f}% merge rate)
+- **Pull Request Activity:** {total_prs_created:,} PRs created, {total_prs_merged:,} merged
 - **Code Review Activity:** {total_prs_reviewed:,} PRs reviewed (ratio: {review_to_create_ratio:.1f} reviews per PR created)
 - **GitOps Deployments:** {total_argocd_deployments:,} ArgoCD syncs, {total_jenkins_builds:,} Jenkins builds{f', {total_git_actions:,} Git Actions runs' if self.has_actions_data else ''}{f' ({avg_deployment_success:.1f}% combined success rate)' if deployment_success_rates else ''}
 - **Jira Tickets:** {total_tickets_opened:,} opened, {total_tickets_closed:,} closed, {total_tickets_in_progress:,} in progress
@@ -341,8 +340,6 @@ class TeamMetricsReportGenerator:
             zd_solved = zd_data.get('ticket_activity', {}).get('solved', 0)
             zd_comments = zd_data.get('collaboration', {}).get('agent_total_comments', 0)
 
-            merge_rate = f"{(prs_merged/prs_created*100):.1f}%" if prs_created > 0 else "N/A"
-
             actions_col = ''
             if self.has_actions_data:
                 actions_runs = git_data.get('actions', {}).get('total_runs', 0)
@@ -365,7 +362,7 @@ class TeamMetricsReportGenerator:
                     alert_cols += (f" {alert_escalations.get('escalated_by', 0)} |"
                                    f" {alert_escalations.get('escalated_to', 0)} |")
 
-            table_rows.append(f"| **{self._label(member)}** | {commits:,} | {prs_created} | {prs_merged} ({merge_rate}) | {prs_reviewed} | {syncs} | {jenkins_builds} |{actions_col} {jira_opened} | {jira_closed} | {jira_comments} | {zd_solved} | {zd_comments} |{csat_col}{alert_cols}")
+            table_rows.append(f"| **{self._label(member)}** | {commits:,} | {prs_created} | {prs_merged} | {prs_reviewed} | {syncs} | {jenkins_builds} |{actions_col} {jira_opened} | {jira_closed} | {jira_comments} | {zd_solved} | {zd_comments} |{csat_col}{alert_cols}")
 
         return '\n'.join(table_rows)
 
@@ -524,7 +521,6 @@ class TeamMetricsReportGenerator:
             prs_created = pr_data.get('created', 0)
             prs_merged = pr_data.get('merged', 0)
             prs_reviewed = pr_data.get('reviewed', 0)
-            merge_rate = (prs_merged / prs_created * 100) if prs_created > 0 else 0
 
             # ArgoCD activity
             argocd_data = argocd_metrics.get(member, {})
@@ -631,8 +627,9 @@ class TeamMetricsReportGenerator:
                              f"{self._count(repos, 'repository', 'repositories')}")
 
             if prs_created or prs_merged:
-                lines.append(f"**Pull Requests:** {prs_created} created, {prs_merged} merged "
-                             f"({merge_rate:.1f}% merge rate)")
+                # Per person, "merged" is PRs they merged (anyone's), so a ratio
+                # against the PRs they opened would be meaningless here.
+                lines.append(f"**Pull Requests:** {prs_created} created, {prs_merged} merged")
 
             if prs_reviewed:
                 lines.append(f"**Code Reviews:** {self._count(prs_reviewed, 'review')} performed")
